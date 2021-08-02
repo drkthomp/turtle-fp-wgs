@@ -221,17 +221,17 @@ prepCounts <- function(sample_data, bp = 5000, normType = "poisson",
     load(count_file)
   } else {
     # Read in and normalize the counts
-    if(file.exists(raw_file)){
+    if (file.exists(raw_file)) {
       message("Raw file exists at ", raw_file)
       load(raw_file)
-    }else{
-    norm_grange <- apply(sample_data, 1, normCounts,
-      bp = bp,
-      normType = normType, sizeFactor = sizeFactor
-    )
-    names(norm_grange) <- sample_data$sample_name
-    save(norm_grange, file=raw_file)
-    message("Saving raw normalization counts at ", raw_file)
+    } else {
+      norm_grange <- apply(sample_data, 1, normCounts,
+        bp = bp,
+        normType = normType, sizeFactor = sizeFactor
+      )
+      names(norm_grange) <- sample_data$sample_name
+      save(norm_grange, file = raw_file)
+      message("Saving raw normalization counts at ", raw_file)
     }
 
     norm_grange_filtered <- filterCountsAcrossSamples(norm_grange,
@@ -263,13 +263,13 @@ callCNVfromNorm <- function(norm, minReadCount = 5, parallel = 2) {
 # and remove the call if a tumour’s normalised median read count within
 # it is not significantly above or below its background distribution
 # across the whole genome/chromosome
-filterCNVSignifigance <- function(segmented){
+filterCNVSignifigance <- function(segmented) {
 }
 
 # remove the call if both tumour AND matched normal(s)
 # deviate significantly from their background distributions
 # (in this case it’s likely not a tumour-specific event)
-filterCNVTumour <- function(segmented){
+filterCNVTumour <- function(segmented) {
 
 }
 ###### 3.2.3 Visualization ######
@@ -279,34 +279,34 @@ plotCNV <- function(tum, segmented, base_loc, lim = 5) {
   if (!(reuse && file.exists(chromplot_file))) {
     message("Generating chromosome plot at ", chromplot_file)
     try({
-    png(
-      file = chromplot_file,
-      width = 3000,
-      height = 1500
-    )
-    segplot(
-      segmented[[tum]],
-      ylim = c(-lim, lim),
-      plot.type = "s"
-    )
-    dev.off()
+      png(
+        file = chromplot_file,
+        width = 3000,
+        height = 1500
+      )
+      segplot(
+        segmented[[tum]],
+        ylim = c(-lim, lim),
+        plot.type = "s"
+      )
+      dev.off()
     })
   }
   if (!(reuse && file.exists(segplot_file))) {
     message("Generating chromosome plot at ", segplot_file)
     try({
-    pdf(segplot_file,
-      width = 18,
-      height
-      = 9
-    )
-    segplot(
-      segmented[[tum]],
-      ylim = c(-lim, lim),
-      plot.type = "w",
-      pt.cols = c("#333333", "#000000")
-    )
-    dev.off()
+      pdf(segplot_file,
+        width = 18,
+        height
+        = 9
+      )
+      segplot(
+        segmented[[tum]],
+        ylim = c(-lim, lim),
+        plot.type = "w",
+        pt.cols = c("#333333", "#000000")
+      )
+      dev.off()
     })
   }
 }
@@ -336,17 +336,17 @@ for (normType in c("poisson", "mode", "mean", "min", "median", "quant")) {
         )
         # then the only seg option, minReadCount
         for (minReadCount in c(4, 8, 10, 16, 20, 32)) {
-          seg_file <-paste0(
+          seg_file <- paste0(
             "partials/segmented/", bp, "/", normType, "/",
             sizeFactor, "-", filter, "-", byChrom, "-", minReadCount, ".gz"
           )
-          if(reuse & file.exists(seg_file)){
+          if (reuse & file.exists(seg_file)) {
             message("Segmentation file exists for minReadCount ", minReadCount)
             load(seg_file)
-          } else{
+          } else {
             message("Running segmentation for minReadCount ", minReadCount)
-          segmented <- lapply(norm_grange, callCNVfromNorm, minReadCount = minReadCount)
-          save(segmented, file = seg_file)
+            segmented <- lapply(norm_grange, callCNVfromNorm, minReadCount = minReadCount)
+            save(segmented, file = seg_file)
           }
 
           message("Plotting segmentation")
