@@ -1,0 +1,106 @@
+---
+params: 
+    type: "within"
+    bp: 5000
+    minReadCount: 4
+    normType: "poisson"
+    sizeFactor: "mean"
+title: "CNV Gene Analysis" 
+---
+Run on `r date()` with `r params$bp`bp size windows, `r params$normType` normalized with the `r params$sizeFactor` size factor. A minimum of `r params$minReadCount` CNVs were required for a segment to be recorded. Gene annotations were done as `r params$type` with the segment. 
+
+```{r Load Libraries}
+library("chroma")
+library(eulerr)
+library(UpSetR)
+library(RColorBrewer)
+library(GenomicRanges)
+library(tidyverse)
+library(janitor)
+library(STRINGdb)
+```
+
+## Overlap Analysis 
+```{r Load Valid Files}
+file_list <- list.files(path=paste("partials/cnv",params$type,params$bp,params$normType,sep="/"),pattern=paste0(params$sizeFactor, "-", params$minReadCount, "-*"),full.names = TRUE)
+```
+To minimize false positives, analysis of CNVs throws out the ends of the chromosomes for any of Yucca's samples. 
+```{r Read in CNV Ids}
+
+read.cnv <- function(x){
+  load(x)
+  cnv <- as.data.frame(cnv)
+  cnv <- cnv %>% mutate(id=paste0(seqnames,":",start,"-",end)) # and make a unique id for each region
+  return(cnv)
+}
+
+read.cnv.all <- function(x) {
+  cnv <- read.cnv(x)
+  #cnv <- as.data.frame(cnv %>% mutate(src=x)) # and store the src 
+  return(cnv %>% mutate(TUMOUR = parse_number(TUMOUR)) %>%  relocate(TUMOUR, .after = last_col()) %>% rename("{x}":=TUMOUR))
+}
+read.cnv.id <- function(x) {
+  return(read.cnv(x)$id)
+}
+read.cnv.genes <- function(x) {
+  return(unique(as.character(unlist(read.cnv(x)$gene_id))))
+}
+
+# set the colors to see all the samples with 
+colors_edge <- as.vector(c("#e41a1c", rep("#377eb8",2), "#4daf4a", "#984ea3","#c36100", "#c47800", "#c38e00", rep("#bfa407", 3), "#b9b925"))
+colors_fill <- alpha(lighten(colors_edge,amount=2))
+cnv_ids <- lapply(file_list, read.cnv.id)
+names <- str_split(str_split_fixed(file_list, "/", 6)[,6],"-",simplify = TRUE)[,3]
+names(cnv_ids) <- names
+
+sets <- rev(names(cnv_ids))
+metadata <- as.data.frame(cbind(sets, colors=sets))
+```
+
+```{r Region Overlaps}
+#png("region_overlap.png",width=1200,height=675)
+upset(fromList(cnv_ids), order.by = "degree",mb.ratio = c(0.4, 0.6),mainbar.y.label = "CNVs Shared", sets.x.label = "CNVS per Sample",sets=sets,keep.order = TRUE,sets.bar.color = rev(colors_edge), set.metadata = list(data = metadata, plots = list(list(type = "matrix_rows", 
+    column = "colors", colors = setNames(colors_edge, names(cnv_ids)), 
+    alpha = 1))))
+#dev.off()
+head(fromList(cnv_ids) %>% mutate(region=unique(unlist(cnv_ids))) %>%  adorn_totals(where="col") %>% arrange(-Total),30)
+```
+```{r Gene Overlap Within, fig.width=15}
+cnv_genes <- lapply(file_list, read.cnv.genes)
+names(cnv_genes) <- names
+upset(fromList(cnv_genes), order.by = "degree", nintersects = NA, mb.ratio = c(0.4, 0.6),mainbar.y.label = "Genes in Intersection", sets.x.label = "Genes per Sample",sets=sets,keep.order = TRUE,sets.bar.color = rev(colors_edge), set.metadata = list(data = metadata, plots = list(list(type = "matrix_rows", 
+    column = "colors", colors = setNames(colors_edge, names(cnv_ids)), 
+    alpha = 1))))
+#write.csv(matching_list, file=paste0(params$type, "/overlap_",throwout,".csv"))
+```
+```{r Count Within}
+head(fromList(cnv_genes) %>% mutate(region=unique(unlist(cnv_genes))) %>%  adorn_totals(where="col") %>% arrange(-Total),40)
+```
+
+
+## Euler Plots
+
+Doing a euler or venn for all 12 samples is too much to accurately represent, but we can group them instead: 
+
+### Group by Turtle 
+
+```{r}
+genes_by_turtle <- list(`27L`=cnv_genes$`27L1Fdna`, Flower=unique(c(cnv_genes$flSCEYfdna, cnv_genes$flSCINFdna)), Poppy=cnv_genes$poSCTFdna, Aladar=cnv_genes$TABT, Yucca=unique(c(cnv_genes$yuLIRSFdna, cnv_genes$yuRERFdna, cnv_genes$yuRIRSFdna, cnv_genes$yuRKTGFdna, cnv_genes$yuRKTMFdna, cnv_genes$yuRKTW1Fdna, cnv_genes$yuTSFdna)))
+fit <- euler(genes_by_turtle,shape="ellipse")
+plot(fit,fills=unique(colors_fill)[1:length(genes_by_turtle)],adjust_labels=TRUE,quantities=TRUE, legend=TRUE)
+```
+### Group by Tissue 
+```{r}
+genes_by_tissue <- list(Lung=unique(c(cnv_genes$`27L1Fdna`,cnv_genes$TABT)), Eye=unique(c(cnv_genes$flSCEYfdna,cnv_genes$yuRERFdna)), Inguinal=unique(c(cnv_genes$flSCINFdna,cnv_genes$yuLIRSFdna, cnv_genes$yuRIRSFdna)), Tail=unique(c(cnv_genes$poSCTFdna,cnv_genes$yuTSFdna)),Kidney=unique(c(cnv_genes$yuRKTGFdna, cnv_genes$yuRKTMFdna, cnv_genes$yuRKTW1Fdna)))
+fit <- euler(genes_by_tissue,shape="ellipse")
+plot(fit,adjust_labels=TRUE,quantities=TRUE, legend=TRUE)
+```
+### Group by External/Internal 
+```{r}
+genes_by_src <- list( External=unique(c(cnv_genes$flSCEYfdna,cnv_genes$yuRERFdna,cnv_genes$flSCINFdna,cnv_genes$yuLIRSFdna, cnv_genes$yuRIRSFdna,cnv_genes$poSCTFdna,cnv_genes$yuTSFdna)),Internal=unique(c(cnv_genes$yuRKTGFdna, cnv_genes$yuRKTMFdna, cnv_genes$yuRKTW1Fdna,cnv_genes$`27L1Fdna`,cnv_genes$TABT)))
+fit <- euler(genes_by_src,shape="ellipse")
+plot(fit,adjust_labels=TRUE,quantities=TRUE, legend=TRUE,weights=c(1-(7/12),(1-(5/12))))
+```
+
+
+

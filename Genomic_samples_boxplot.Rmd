@@ -1,0 +1,74 @@
+---
+title: Looking at the Prelim Counts
+date: "`r format(Sys.time(), '%d %B, %Y')`"
+---
+
+```{r}
+library(tidyverse)
+library(janitor)
+samples <- read.delim("~/2021-REU/Genomic_Samples_Table.xlsx - Sheet1.tsv") %>% clean_names() %>% mutate(type =  case_when(type == "Old" ~ "Old (Hiseq)", type == "New" ~ "New (Novaseq)"))
+names(samples)[names(samples) == 'internal_external'] <- 'tumor_src'
+names(samples)[names(samples) == 'tumor_non_tumor'] <- 'tissue_status'
+samples <- samples %>%  mutate(c_mydas_alignment_rate=as.numeric(str_remove_all(c_mydas_alignment_rate,"%"))) %>% mutate(mean_depth_of_coverage_hisat2 = str_remove_all(mean_depth_of_coverage_hisat2, "x")) %>%
+  separate(mean_coverage_hisat2, c("mean_coverage_hisat2", "mean_coverage_hisat2_stdev"),convert=TRUE) %>%
+    separate(mean_depth_of_coverage_hisat2, c("mean_depth_of_coverage_hisat2", "mean_depth_of_coverage_hisat2_stdev"),convert=TRUE)
+
+sizes <- read.csv("~/2021-REU/sizes.csv", header=FALSE)
+colnames(sizes) <- c("sample_name", "size")
+sizes <- left_join(sizes, samples %>% select(sample_name, turtle),copy=TRUE) %>% mutate(turtle=case_when(is.na(turtle) ~ "Flower", TRUE ~ turtle))
+```
+
+```{r}
+src <- ggplot(samples %>% filter(tumor_src != ""), aes(x=type,color=tumor_src)) + theme_minimal() + labs(color="Tumor Source") 
+src + geom_boxplot(aes(y=c_mydas_aligned_reads)) + scale_y_continuous(name = "Reads Aligned to C. mydas Genome")
+src + geom_boxplot(aes(y=c_mydas_alignment_rate)) + scale_y_continuous(name = "Alignment Rate to C. mydas")
+```
+
+```{r}
+stat <- ggplot(samples %>% filter(tissue_status != ""), aes(x=type,color=tissue_status)) + theme_minimal() + labs(color="Tumor Status") + scale_x_discrete(name="", labels=c("New"="new","Old"="HiSeq"))
+stat + geom_boxplot(aes(y=c_mydas_aligned_reads)) + scale_y_continuous(name = "Reads Aligned to C. mydas Genome")
+stat + geom_boxplot(aes(y=c_mydas_alignment_rate)) + scale_y_continuous(name = "Alignment Rate to C. mydas")
+```
+
+```{r Coverage}
+stat <- ggplot(samples %>% filter(tissue_status != ""), aes(x=type,color=tissue_status)) + theme_minimal() + labs(color="Tumor Status") + scale_x_discrete(name="", labels=c("New"="new","Old"="HiSeq"))
+
+stat + geom_boxplot(aes(y=mean_depth_of_coverage_hisat2)) + scale_y_continuous(name = "Mean Depth of Coverage with HiSat2")
+
+
+
+
+ggplot(samples, aes(x=reorder(sample_name,mean_coverage_hisat2),y=mean_coverage_hisat2,color=type)) + theme_minimal() +  geom_hline(yintercept=80)+ geom_pointrange(aes(ymin=mean_coverage_hisat2-mean_coverage_hisat2_stdev, ymax=mean_coverage_hisat2+mean_coverage_hisat2_stdev))
+
+req <- 80
+
+forbar <- samples %>% mutate(mean_coverage_hisat2 > 0) %>% mutate(highlight = case_when(mean_coverage_hisat2-mean_coverage_hisat2_stdev > req ~ TRUE, TRUE ~ FALSE)) 
+
+
+ggplot(forbar, aes(x=reorder(sample_name,mean_coverage_hisat2), y=mean_coverage_hisat2, fill=req -(mean_coverage_hisat2-mean_coverage_hisat2_stdev))) + 
+  geom_bar(stat="identity", 
+           position=position_dodge()) +
+  geom_errorbar(aes(ymin=mean_coverage_hisat2-mean_coverage_hisat2_stdev, ymax=mean_coverage_hisat2+mean_coverage_hisat2_stdev), width=.2,
+                 position=position_dodge(.9)) + geom_hline(yintercept=req,linetype="dotted") + scale_fill_viridis_b(name="Distance of Lowest\nPossible Coverage\nfrom Needed (x80)",direction=-1)
+
+```
+
+
+```{r, fig.height=3, fig.width=2}
+sizeplot <- ggplot(sizes,aes(x=reorder(turtle,size), y=size)) +geom_boxplot(color="darkgrey")  + geom_point(size=0.5,alpha=0.5)  + labs(x=NULL,y="Size of Trimmed Raw Reads (Gb)") + theme_minimal() + theme(panel.background=element_blank(),
+                            panel.border = element_blank(),
+                            panel.grid.minor = element_blank(),
+                            axis.text.x = element_text(angle = 45,hjust=1)
+                            # plot.margin=unit(c(-4,0,-4,0), "cm"),
+)
+sizeplot
+ggsave(sizeplot,dpi=600,width=2,height=3,bg="transparent",device="png",filename="sizeplot.png")
+```
+
+```{r}
+ggplot(samples, aes(x=turtle,y=c_mydas_alignment_rate))  + theme_minimal() + labs(color="Tumor Source") + scale_color_discrete(name="", labels=c("New"="New","Old"="HiSeq"))  + geom_boxplot() + geom_point(aes(color=type)) +  scale_y_continuous(name = "Alignment Rate")
+```
+```{r Project Plot}
+ggplot(samples, aes(reorder(turtle, total_trimmed_reads),color=type, total_trimmed_reads)) + geom_boxplot(alpha=0.7) + geom_point(color="black",size=0.8) + theme_minimal() + scale_y_continuous(labels=scales::unit_format(unit = "mil", scale = 1e-6)) +  labs(x="", y="Total Trimmed Reads",color="Sequencing Type")  + theme(axis.text.x = element_text(angle = 45,hjust=1))
+max(samples$total_trimmed_reads)
+```

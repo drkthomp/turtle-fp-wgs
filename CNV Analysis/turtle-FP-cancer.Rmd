@@ -1,0 +1,697 @@
+---
+title: "CNV Analysis"
+output: html_notebook
+---
+```{r Preset, warning=TRUE, include=FALSE}
+library(cn.mops)
+library(GenomicRanges)
+library(tidyverse)
+library(janitor)
+library(GenomicFeatures)
+#library(conflicted)
+library(BSgenome.Cmydas.NCBI.rCheMyd1)
+library("chroma")
+library(eulerr)
+library(UpSetR)
+library(RColorBrewer)
+library(knitr)
+
+
+
+# determine whether to use files already generated  
+reuse <- TRUE 
+```
+
+# CNV Calling 
+
+## Defining Parameters 
+
+First we load the matched tumor and normal data that we're working with. 
+```{r Loading Sample Data}
+if(file.exists("partials/sample_data") && reuse){
+  message("Sample data file exists, loading.")
+  # if we've already done this, just load it 
+  load("partials/sample_data")
+} else {
+  message("Generating sample data file.")
+sample_data <-
+  read.delim("~/2021-REU/Genomic_Samples_Table.xlsx - Sheet1.tsv") %>% clean_names() %>% mutate(sample_name = str_replace_all(sample_name, " - HiSeq", "")) %>% filter(type == "New")
+
+# correct column names
+names(sample_data)[names(sample_data) == 'internal_external'] <-
+  'tumor_src'
+names(sample_data)[names(sample_data) == 'tumor_non_tumor'] <-
+  'tissue_status'
+
+# and STATICALLY correct Yucca's kidneys to be analyzed seperately
+sample_data <-
+  sample_data %>% mutate(turtle = case_when((turtle == 'Yucca' &
+                                               tumor_sample_location == 'kidney ') ~ "Yucca_kidney",
+                                            TRUE ~ turtle
+  ))
+
+
+# create only the match data for turtle, tumor, and non-tumor
+match_data  <- sample_data %>%
+  pivot_wider(names_from = tissue_status,
+              values_from = sample_name,
+              id_cols = turtle) %>% unnest(c(tumor, 'non-tumor'))
+# and correct the non-tumor to a more tidy normal
+names(match_data)[names(match_data) == 'non-tumor'] <- 'normal'
+
+# then combine the data for easy iteration
+sample_data <-
+  left_join(sample_data %>% filter(tissue_status == 'tumor'), match_data, by = c("sample_name" = "tumor")) %>% select(-"turtle.y") %>%  distinct()
+
+# and save it for use in other scripts for simplicity
+  save(sample_data,"partials/sample_data")
+}
+
+```
+
+We can then note relevant settings 
+```{r Settings}
+dataloc <- 'readcounts/' # note where the readcounts are
+bp <- 5000  # then bp we're using
+# and the final file name before the tumor:
+file_prefix <- paste0(dataloc, "readcounts_",bp,"BP_")
+```
+
+and get the relevant reference data 
+```{r Genome Reference}
+txdb <- loadDb("~/2021-REU/CNV Analysis/rCheMyd1.sqlite") # generated from rCheMyd1 
+ref <- getChromInfoFromNCBI("GCF_015237465.1",assembled.molecules.only=TRUE,assembly.units = "Primary Assembly")
+ref_seq <- getChromInfoFromNCBI("GCF_015237465.1",as.Seqinfo=TRUE,assembled.molecules.only=TRUE,assembly.units = "Primary Assembly")
+seqnames(ref_seq) <- ref$RefSeqAccn
+```
+## Loading data 
+
+**For each paired tumor and normal** we'll then 
+```{r, eval=FALSE}
+tum <- x[names(x) == 'sample_name']
+normal <- x[names(x) == 'normal']
+tum_name <- str_replace(tum, "_", "-")
+```
+### Read in the read counts 
+```{r Read In}
+tumors <- c()
+read_in <- function(x) {
+  tumor_file <-
+    paste0(file_prefix, x[names(x) == 'sample_name'], '.txt')
+  normal_file <-
+    paste0(file_prefix, x[names(x) == 'normal'], '.txt')
+
+  message(paste("Reading in",tumor_file,"and",normal_file))
+
+  # make sure that we've actually downloaded the files
+  if (file.exists(tumor_file) && file.exists(normal_file)) {
+    tumor <-
+      read.table(
+        tumor_file,
+        header = T,
+        strip.white = T,
+        check.names = F,
+        sep = '\t'
+      )
+    normal <-
+      read.table(
+        normal_file,
+        header = T,
+        strip.white = T,
+        check.names = F,
+        sep = '\t'
+      )
+
+    # and now append host
+    result <- left_join(
+      tumor,
+      normal,
+      suffix = c("_TUMOR", "_NORMAL"),
+      by = c("SCAFFOLD", "START", "END")
+    )
+    colnames(result)[4:5] <- c('TUMOUR', 'HOST')
+    type_convert(result)
+
+    # dropping the mitochondria mapping here
+    result <-
+      result %>% filter(SCAFFOLD %in% ref$RefSeqAccn) %>% mutate(SCAFFOLD = as.factor(SCAFFOLD))
+
+    final <-
+      makeGRangesFromDataFrame(result,
+                               seqnames.field = "SCAFFOLD",
+                               keep.extra.columns = TRUE)
+    seqinfo(final) <- ref_seq # update the seqinfo with the relevant genome info
+    tumors <<-
+      c(tumors, as.character(str_replace_all(x[names(x) == 'sample_name'], "-", "_")))
+
+    return(final)
+  }
+}
+```
+```{r Running Read in, eval=FALSE}
+gr <- read_in(x)
+```
+### Normalize the data
+```{r Normalization, eval=FALSE}
+    print(paste0("=== NORMALIZING FOR TUMOR ", tum))
+    norm <- normalizeGenome(gr,sizeFactor = "median")
+    # and save the call for future use
+    save(norm, file=paste0("partials/normalized/",tum,"-",normal,".gz"),compress=TRUE)
+```
+
+### Call The Counts
+```{r Call CNV Counts}
+# wrapper function to call segmentation
+callCounts <- function(norm) {
+  segmented <- referencecn.mops(
+    cases = norm[, 'TUMOUR'],
+    controls = norm[, 'HOST'],
+    minReadCount = 6,
+    sizeFactor="quant",
+    segAlgorithm = 'fast'
+  )
+  return(calcIntegerCopyNumbers(segmented))
+}
+```
+```{r Call Counts, eval=FALSE}
+    print(paste0("=== CALLING FOR TUMOR ", tum))
+    segmented <- callCounts(norm)
+    # and save the call for future use
+    save(segmented, file=paste0("partials/segmented/",tum,"-",normal,".gz"),compress=TRUE)
+```
+
+We can then process images based on those counts. 
+
+### Actual Run 
+```{r}
+cnvAnalysis <- function(x) {
+  tum <- x[names(x) == 'sample_name']
+  normal <- x[names(x) == 'normal']
+  tum_name <- str_replace(tum, "_", "-")
+  norm_file <- paste0("partials/normalized/",tum,"-",normal,".gz")
+  segmented_file <- paste0("partials/segmented/",tum,"-",normal,".gz")
+  chromplot_file <- paste0("plots/",
+                  tum,
+                  ' FP - chromosome segplot.png')
+  segplot_file <- paste0("plots/",
+                  tum,
+                  ' FP - segplot.pdf')
+  if(reuse && file.exists(norm_file) && file.exists(segmented_file) && file.exists(chromplot_file) && file.exists(segplot_file)){
+    message(paste("All files exists for tumor",tum, "-- ending generation."))
+  }
+  else {
+
+  # Read in
+  gr <- read_in(x)
+  if (!is.null(gr)) { # ensure that we can proceed
+    if(reuse && file.exists(norm_file)){
+      message(paste("Normalization file exists for tumor",tum))
+      load(norm_file)
+    } else {
+      message(paste("=== NORMALIZING FOR TUMOR", tum))
+    norm <- normalizeGenome(gr,sizeFactor = "median")
+    # and save the call for future use
+    save(norm, file=norm_file,compress=TRUE)
+    }
+
+    
+    if(reuse && file.exists(segmented_file)){
+      message(paste("Segmentation file exists for tumor",tum))
+      load(segmented_file)
+    }
+    else {
+    # Call counts
+    message(paste("=== CALLING FOR TUMOR", tum))
+    segmented <- callCounts(norm)
+    # and save the call for future use
+    save(segmented, file=segmented_file,compress=TRUE)
+    }
+    
+    
+    if(!(reuse &&file.exists(chromplot_file))){
+      message("Generating chromosome plot at ", chromplot_file)
+      png(
+    file = chromplot_file,
+    width = 3000,
+    height = 1500
+  )
+  segplot(
+    segmented,
+    ylim = c(-5, 5),
+    plot.type = "s"
+  )
+  dev.off()
+    }
+    if(!(reuse && file.exists(segplot_file))){
+      message("Generating chromosome plot at ", segplot_file)
+      pdf(segplot_file,
+    width = 18,
+    height
+    = 9)
+  segplot(
+    segmented,
+    ylim = c(-5, 5),
+    plot.type = "w",
+    pt.cols=c("#333333","#000000")
+  )
+  dev.off()
+      
+    }
+    
+
+  # cn.mops style segmentation graph
+  
+  }
+  else {
+    message("ERROR: Couldn't find read counts file for ", tum)
+  }
+  }
+}
+apply(sample_data, 1, cnvAnalysis)
+gc()
+```
+## Analysis 
+There’s definitely two samples (animals 27 & Poppy) with a full chr.14 gain, worth following up on - especially if these turn out to be recurrent events.
+
+### 27-2017-Cm 
+```{r echo=FALSE}
+include_graphics("plots/27L1Fdna FP - chromosome segplot.png")
+```
+ 27-2017-Cm lung FP, whole chromosome 14 amplification, signal = clean
+ 
+### Poppy 
+```{r echo=FALSE}
+include_graphics("plots/poSCTFdna FP - chromosome segplot.png")
+```
+- Poppy FP, whole chromosome 4 and 14 amplifications, subclonal or low purity, signal = clean
+
+### Aladar
+```{r echo=FALSE}
+include_graphics("plots/TABT-Cm FP - chromosome segplot.png")
+```
+- Aladar bladder FP, possibly a few losses (e.g. end of chr5, two small ones on chr7, early chr12, end of chr13), however signal = noisy, particularly at ends of smaller chromosomes
+
+### Yucca 
+```{r echo=FALSE}
+include_graphics("plots/yuLIRSFdna FP - chromosome segplot.png")
+include_graphics("plots/yuRERFdna FP - chromosome segplot.png")
+include_graphics("plots/yuRIRSFdna FP - chromosome segplot.png")
+include_graphics("plots/yuRKTGFdna FP - chromosome segplot.png")
+include_graphics("plots/yuRKTMFdna FP - chromosome segplot.png")
+include_graphics("plots/yuRKTW1Fdna FP - chromosome segplot.png")
+include_graphics("plots/yuTSFdna FP - chromosome segplot.png")
+```
+- Yucca left inguinal FP, signal = very noisy
+- Yucca right eye FP, signal = very noisy
+- Yucca kidney FP (#1-3), signal = very noisy
+- Yucca tail FP (#1-3), signal = very noisy
+
+"Though the majority of samples, particularly Yucca’s, are definitely too noisy for these CNV calls to be trusted. We’d likely run into a high proportion of false positive hits when intersecting the current cnMOPS calls with gene lists, doing GO term analyses, etc."
+
+# CNV Annotation 
+To annotate, we need to have the relevant DNA and amino acid sequences from the genome. 
+```{r}
+dna <- extractTranscriptSeqs(BSgenome.Cmydas.NCBI.rCheMyd1, txdb,
+                      use.names=TRUE)
+aa <- suppressWarnings(translate(dna))
+```
+The functions to annotate both for transcripts and genes: 
+```{r}
+saveSeq <- function(cnv, seqs, save_file){
+  # get the actual protein sequences
+  sequences <- getSeq(seqs, as.character(unlist(cnv$tx_name)))
+
+  # and save them for lookup
+  writeLines(paste0("> ", names(sequences), "\n", sequences), save_file)
+
+}
+
+annotateTranscripts <- function(cnv, txdb, tum)
+{
+  # by Martin Morgan
+  # from https://support.bioconductor.org/p/96427/
+  stopifnot(is(cnv, "GRanges"), is(txdb, "TxDb")) # error checking
+  anno = transcripts(txdb) # get the genes from the ref
+  olaps = findOverlaps(cnv, anno, ignore.strand = TRUE, type = type) # find the overlaps
+  mcols(olaps)$tx_name = anno$tx_name[subjectHits(olaps)]
+  cnv_factor = factor(queryHits(olaps), levels = seq_len(queryLength(olaps)))
+  cnv$tx_name = splitAsList(mcols(olaps)$tx_name, cnv_factor) # and add them to the cnvs
+  return(cnv)
+}
+
+annotateGenes <- function(cnv, txdb)
+{
+  # by Martin Morgan
+  # from https://support.bioconductor.org/p/96427/
+  stopifnot(is(cnv, "GRanges"), is(txdb, "TxDb")) # error checking
+  anno = genes(txdb) # get the genes from the ref
+  olaps = findOverlaps(cnv, anno, ignore.strand = TRUE, type = type) # find the overlaps
+  mcols(olaps)$gene_id = anno$gene_id[subjectHits(olaps)]
+  cnv_factor = factor(queryHits(olaps), levels = seq_len(queryLength(olaps)))
+  cnv$gene_id = splitAsList(mcols(olaps)$gene_id, cnv_factor) # and add them to the cnvs
+  return(cnv)
+}
+```
+
+Then we can actually save the relevant CNV annotations. There are two possible way to call the genes and transcripts overlapping with the CNV regions, the more conservative 'within' and the more open 'any'. We run and save both. 
+```{r}
+throwout <- 'yu'
+throwout_percent <- .05
+
+toThrowout <- function(start){
+  loc <- as.numeric(start)/as.numeric(ref[ref$RefSeqAccn == "NC_051241.1",]$SequenceLength)
+  return(loc<throwout_percent | loc > (1-throwout_percent))
+}
+
+cnvDownstream <- function(x) {
+  tum <- x[names(x) == 'sample_name']
+  normal <- x[names(x) == 'normal']
+  tum_name <- str_replace(tum, "_", "-")
+  
+  # files that would be generated during this 
+  cnv_file <- paste0("partials/cnv/",type,"/",tum,"-",normal,".gz")
+  gene_file <- paste0(type,"/", tum, "_cnvs.txt")
+  table_file <- paste0(type,"/", tum, "_cnvs.tsv")
+    protein_file <- paste0(type,"/",tum, "_protein_sequences.txt")
+  dna_file <- paste0(type,"/",tum, "_dna_sequences.txt")
+  
+  if(reuse && file.exists(cnv_file) && file.exists(gene_file) && file.exists(table_file) && file.exists(protein_file) && file.exists(dna_file)){
+    message("All files exist for tumor ", tum , " with overlapping settings ", type)
+  }
+  else{
+  if(reuse && file.exists(cnv_file)){
+    message("Loading annotate cnv file ", cnv_file)
+    load(cnv_file)
+  }
+  else{
+  # load in the called data
+  load(paste0("partials/normalized/", tum, "-", normal, ".gz"))
+  load(paste0("partials/segmented/", tum, "-", normal, ".gz"))
+
+  # add annotations
+  print(paste0("=== ANNOTATING FOR TUMOR ", tum))
+  cnv <- cnvr(segmented)
+  cnv <- annotateGenes(cnv, txdb)
+  cnv <- annotateTranscripts(cnv, txdb,tum)
+
+  # and then save the annotations
+  save(cnv, file=cnv_file,compress=TRUE)
+  }
+
+    
+  cnv <- as.data.frame(cnv) %>% mutate(throwout = toThrowout(start) | toThrowout(end))
+  if(grepl(throwout, x)){
+    print(paste("Threw out", count(cnv %>% filter(throwout)), "regions"))
+    print(cnv%>% filter(throwout))
+    cnv <- cnv %>% filter(!throwout)
+  }
+  
+  if(!(reuse && file.exists(gene_file))){
+  write(cnv$gene_id %>% unlist(), gene_file) # only gene information
+  }
+  if(!(reuse && file.exists(table_file))){
+  write.table( # more full data, allows recreation
+    cnv,
+    file = table_file,
+    quote = FALSE,
+    sep = '\t',
+    row.names = FALSE
+  )
+  }
+  # and then save the protein and dna sequences based on the annotated genes
+  if(!(reuse && file.exists(protein_file))){
+    message("Saving cnv protein sequences at ", protein_file)
+    saveSeq(cnv,aa,protein_file)
+  }
+  if(!(reuse && file.exists(dna_file))){
+    message("Saving cnv dna sequences at ", dna_file)
+    saveSeq(cnv,dna, dna_file)
+  }
+  }
+}
+type <- 'within'
+apply(sample_data, 1, cnvDownstream)
+type <- 'any'
+apply(sample_data, 1, cnvDownstream)
+
+# do some cleanup
+rm(dna)
+rm(aa)
+gc()
+```
+You then need to run some bash scripts. 
+```{bash engine.path="/bin/bash"}
+pwd
+cd any/
+find -name "*_cnvs.txt" -exec sh product_name.sh "{}" \;
+sh make_raw.sh 
+```
+
+## Overlap Analysis 
+```{r}
+library(STRINGdb)
+type <- "any"
+file_list <- str_remove(list.files(path=paste0("partials/cnv/",type)), ".gz")
+```
+To minimize false positives, analysis of CNVs throws out the ends of the chromosomes for any of Yucca's samples. 
+```{r message=TRUE, include=FALSE}
+
+read.cnv <- function(x){
+  load(paste0("partials/cnv/",type,"/",x, ".gz"))
+  cnv <- as.data.frame(cnv)
+  cnv <- cnv %>% mutate(id=paste0(seqnames,":",start,"-",end)) # and make a unique id for each region
+  return(cnv)
+}
+
+read.cnv.all <- function(x) {
+  cnv <- read.cnv(x)
+  cnv <- cnv %>% mutate(src=x) # and store the src 
+  return(as.data.frame(cnv))
+}
+read.cnv.id <- function(x) {
+  return(read.cnv(x)$id)
+}
+read.cnv.genes <- function(x) {
+  return(unique(as.character(unlist(read.cnv(x)$gene_id))))
+}
+
+# set the colors to see all the samples with 
+colors_edge <- as.vector(c("#e41a1c", rep("#377eb8",2), "#4daf4a", "#984ea3","#c36100", "#c47800", "#c38e00", rep("#bfa407", 3), "#b9b925"))
+colors_fill <- alpha(lighten(colors_edge,amount=2))
+cnv_ids <- lapply(file_list, read.cnv.id)
+names(cnv_ids) <- str_split(file_list,"-",simplify = TRUE)[,1]
+
+sets <- rev(names(cnv_ids))
+metadata <- as.data.frame(cbind(sets, colors=sets))
+```
+```{r Region UpSetR}
+upset(fromList(cnv_ids), order.by = "degree",mb.ratio = c(0.4, 0.6),mainbar.y.label = "CNVs Shared", sets.x.label = "CNVS per Sample",sets=sets,keep.order = TRUE,sets.bar.color = rev(colors_edge), set.metadata = list(data = metadata, plots = list(list(type = "matrix_rows", 
+    column = "colors", colors = setNames(colors_edge, names(cnv_ids)), 
+    alpha = 1))))
+```
+### Within 
+```{r Gene Overlap Within, fig.width=15}
+type <- 'within'
+cnv_genes <- lapply(file_list, read.cnv.genes)
+names(cnv_genes) <- str_split(file_list,"-",simplify = TRUE)[,1]
+upset(fromList(cnv_genes), order.by = "degree", nintersects = NA, mb.ratio = c(0.4, 0.6),mainbar.y.label = "Genes in Intersection", sets.x.label = "Genes per Sample",sets=sets,keep.order = TRUE,sets.bar.color = rev(colors_edge), set.metadata = list(data = metadata, plots = list(list(type = "matrix_rows", 
+    column = "colors", colors = setNames(colors_edge, names(cnv_ids)), 
+    alpha = 1))))
+```
+```{r Count Within}
+genes <- data.frame(genes=unlist(cnv_genes))
+unique_genes <- genes %>% group_by(genes) %>% tally()%>% arrange(-n)
+write.csv(unique_genes %>% filter(n>1) ,file = paste0(type,"/filter_",throwout,".csv"))
+head(unique_genes)
+```
+
+### Any 
+```{r Gene Overlap Any, fig.width=15}
+type <- 'any'
+cnv_genes <- lapply(file_list, read.cnv.genes)
+names(cnv_genes) <- str_split(file_list,"-",simplify = TRUE)[,1]
+upset(fromList(cnv_genes), order.by = "degree", nintersects = NA, mb.ratio = c(0.4, 0.6),mainbar.y.label = "Genes in Intersection", sets.x.label = "Genes per Sample",sets=sets,keep.order = TRUE,sets.bar.color = rev(colors_edge), set.metadata = list(data = metadata, plots = list(list(type = "matrix_rows", 
+    column = "colors", colors = setNames(colors_edge, names(cnv_ids)), 
+    alpha = 1))))
+```
+```{r Count Any}
+genes <- data.frame(genes=unlist(cnv_genes))
+unique_genes <- genes %>% group_by(genes) %>% tally()%>% arrange(-n)
+write.csv(unique_genes %>% filter(n>1) ,file = paste0(type,"/filter_",throwout,".csv"))
+head(unique_genes)
+```
+
+
+## StringDB Analysis 
+Doing more complex analysis on 'within' seems not worthwhile due to the limited amount of genes. 
+
+```{r}
+library(STRINGdb)
+library(tidyverse)
+library(Biostrings)
+library(GenomicFeatures)
+
+string_db <- STRINGdb$new( version="11", species=9606,score_threshold=150, input_directory="~/2021-REU/CNV Analysis/stringdb")
+
+type <- "any"
+
+# set up the string_db with human mapping
+
+
+### 0. Getting Inputs
+################################
+
+getDescriptions <- function(x){
+  filename <- paste0("~/2021-REU/CNV Analysis/", type, "/", x)
+  description <- NULL
+
+  out <- tryCatch(
+    {
+      description <- read.csv(filename, header=FALSE, sep=";")
+      names(description) <- "genes"
+    },
+    error=function(cond) {
+      message(paste("File does not seem to be valid:", x))
+      message("Here's the original error message:")
+      message(cond)
+      # Choose a return value in case of error
+      return(NULL)
+    },
+    warning=function(cond) {
+      message(paste("File caused a warning:", x))
+      message("Here's the original warning message:")
+      message(cond)
+    }
+  )
+  return(description)
+}
+
+# get the filenames and actual anmes
+
+descriptions_file <- "partials/stringdb/descriptions.gz"
+if(reuse && file.exists(descriptions_file)){
+  load(descriptions_file)
+  names <- names(descriptions)
+} else {
+file_list <- list.files(path=type, pattern="*_raw_descriptions.txt")
+names <- str_remove_all(file_list, "raw_descriptions|txt|cnvs|FILTERED|_|\\.")
+descriptions <- lapply(file_list, getDescriptions)
+names(descriptions) <- names
+save(descriptions,file=descriptions_file)
+}
+
+### 1. Performing String Matching
+################################
+peformString <- function(x){
+  if(file.exists(paste0(type,"/",x,".gz"))){
+    message(paste("File found for STRING on", x))
+    load(paste0(type,"/",x,".gz"))
+    #genes <- multi_map_df(map, string_db$get_aliases(), "STRING_id", "STRING_id", "alias")
+  }
+  else {
+    message(paste("Running STRING on", x))
+    map <- multi_map_df(descriptions[[x]], string_db$get_aliases(), "genes",
+                        "alias", "STRING_id",caseSensitive=FALSE)
+    #genes <- multi_map_df(map, string_db$get_aliases(), "STRING_id","STRING_id", "alias")
+    naDf = subset(map, is.na(STRING_id))
+    if (nrow(naDf) > 0)
+      cat(paste("Warning:  we couldn't map to STRING ", as.integer((nrow(naDf)/nrow(map)) *
+                                                                     100), "% of your identifiers", sep = ""))
+    save(map, file=paste0(type,"/",x,".gz"),compress=TRUE)
+  }
+  if(file.exists(paste0(type,"/",x,".pdf"))){
+    message("Graph already exists.")
+  }
+  else{
+    message(paste("Saving to", paste0(type,"/",x,".pdf")))
+    pdf(file=paste0(type,"/",x,".pdf"),width = 20,height=18)
+    string_db$plot_network(map$STRING_id)
+    dev.off()
+  }
+  return(map)
+}
+
+mappings_file <- "partials/stringdb/mappings.gz"
+if(reuse && file.exists(mappings_file)){
+  load(mappings_file)
+} else {
+mappings <- lapply(unique(names), peformString)
+names(mappings) <- unique(names)
+save(mappings, file=mappings_file)
+}
+```
+### StringDB Plots
+```{bash engine.path="/bin/bash", include=FALSE}
+pwd
+cd any/
+mogrify -verbose -density 500 -resize 800 -format png ./*.pdf
+```
+#### 27L1Fdna
+```{r}
+include_graphics("any/27L1Fdna.png")
+```
+```{r}
+include_graphics("any/27L1Fdna.png")
+include_graphics("any/27L1Fdna.png")
+include_graphics("any/poSCTFdna.png")
+```
+
+### Enrichment 
+```{r}
+options(timeout=600)
+getEnrichment <- function(x){
+  return(string_db$get_enrichment( x$STRING_id ) %>% arrange(p_value))
+}
+enrichments_file <- "partials/stringdb/enrichments.gz"
+if(reuse && file.exists(enrichments_file)){
+  load(enrichments_file)
+} else {
+enrichments <- lapply(mappings, getEnrichment)
+save(enrichments,file=enrichments_file)
+}
+```
+```{r}
+enrichmentSig <- function(x){
+  x <- x %>% filter(p_value < 0.05)
+  return(x$term)
+}
+enrich_terms <- lapply(enrichments, enrichmentSig)
+names(enrich_terms) <- names(cnv_ids)
+upset(fromList(enrich_terms), order.by = "degree",mb.ratio = c(0.4, 0.6),mainbar.y.label = "Signifigant terms", nintersects = NA, sets.x.label = "Signifigant terms per Sample",sets=rev(names(cnv_ids)),keep.order = TRUE,sets.bar.color = rev(colors_edge), set.metadata = list(data = metadata, plots = list(list(type = "matrix_rows", 
+    column = "colors", colors = setNames(colors_edge, names(cnv_ids)), 
+    alpha = 1))))
+```
+## GO Term Analysis 
+```{r}
+annotations_file <- "partials/stringdb/annotations.gz"
+getAnnotations <- function(x){
+  return(string_db$get_annotations(  x$STRING_id  ) %>% arrange(-number_of_genes))
+}
+if(reuse && file.exists(annotations_file)){
+  load(annotations_file)
+} else{
+annotations <- lapply(mappings, getAnnotations)
+save(annotations,file=annotations_file)
+}
+```
+```{r,  fig.width=15}
+# subset to at least some signifigance 
+goSig <- function(x){
+  x <- x %>% filter(ratio_in_set > .1)
+  return(x$term_id)
+}
+
+go_terms <- lapply(annotations,goSig)
+
+
+names(go_terms) <- names(cnv_ids)
+upset(fromList(go_terms), order.by = "degree",mb.ratio = c(0.4, 0.6),mainbar.y.label = "GO terms", sets.x.label = "GO terms per Sample",nintersects=40,sets=rev(names(cnv_ids)),keep.order = TRUE,sets.bar.color = rev(colors_edge), set.metadata = list(data = metadata, plots = list(list(type = "matrix_rows", 
+    column = "colors", colors = setNames(colors_edge, names(cnv_ids)), 
+    alpha = 1))))
+```
+
+
+
+
+
+

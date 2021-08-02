@@ -1,0 +1,188 @@
+---
+title: "CNV Annotation"
+output: html_notebook
+---
+```{r}
+library(cn.mops)
+library(GenomicRanges)
+library(tidyverse)
+library(janitor)
+library(GenomicFeatures)
+library(BSgenome.Cmydas.NCBI.rCheMyd1) # this was custom generated and should be provided in the GitHub
+
+library(knitr)
+theme_set(theme_minimal())
+saveloc <- "02-Annotation/"
+reuse <- TRUE
+```
+
+# CNV Annotation 
+To annotate, we need to have the relevant DNA and amino acid sequences from the genome. 
+```{r}
+txdb <- loadDb("rCheMyd1.sqlite") # generated from rCheMyd1 
+load("partials/sample_data")
+
+dna <- extractTranscriptSeqs(BSgenome.Cmydas.NCBI.rCheMyd1, txdb,
+                      use.names=TRUE)
+aa <- suppressWarnings(translate(dna))
+```
+and  the relevant genome data. 
+```{r Genome Reference}
+txdb <- loadDb("rCheMyd1.sqlite") # generated from rCheMyd1 
+ref <- getChromInfoFromNCBI("GCF_015237465.1",assembled.molecules.only=TRUE,assembly.units = "Primary Assembly")
+ref_seq <- getChromInfoFromNCBI("GCF_015237465.1",as.Seqinfo=TRUE,assembled.molecules.only=TRUE,assembly.units = "Primary Assembly")
+seqnames(ref_seq) <- ref$RefSeqAccn
+```
+The functions to annotate both for transcripts and genes: 
+```{r}
+saveSeq <- function(cnv, seqs, save_file){
+  # get the actual protein sequences
+  sequences <- getSeq(seqs, as.character(unlist(cnv$tx_name)))
+
+  # and save them for lookup
+  writeLines(paste0("> ", names(sequences), "\n", sequences), save_file)
+
+}
+
+annotateTranscripts <- function(cnv, txdb, tum)
+{
+  # by Martin Morgan
+  # from https://support.bioconductor.org/p/96427/
+  stopifnot(is(cnv, "GRanges"), is(txdb, "TxDb")) # error checking
+  anno = transcripts(txdb) # get the genes from the ref
+  olaps = findOverlaps(cnv, anno, ignore.strand = TRUE, type = type) # find the overlaps
+  mcols(olaps)$tx_name = anno$tx_name[subjectHits(olaps)]
+  cnv_factor = factor(queryHits(olaps), levels = seq_len(queryLength(olaps)))
+  cnv$tx_name = splitAsList(mcols(olaps)$tx_name, cnv_factor) # and add them to the cnvs
+  return(cnv)
+}
+
+annotateGenes <- function(cnv, txdb)
+{
+  # by Martin Morgan
+  # from https://support.bioconductor.org/p/96427/
+  stopifnot(is(cnv, "GRanges"), is(txdb, "TxDb")) # error checking
+  anno = genes(txdb) # get the genes from the ref
+  olaps = findOverlaps(cnv, anno, ignore.strand = TRUE, type = type) # find the overlaps
+  mcols(olaps)$gene_id = anno$gene_id[subjectHits(olaps)]
+  cnv_factor = factor(queryHits(olaps), levels = seq_len(queryLength(olaps)))
+  cnv$gene_id = splitAsList(mcols(olaps)$gene_id, cnv_factor) # and add them to the cnvs
+  return(cnv)
+}
+```
+
+Then we can actually save the relevant CNV annotations. There are two possible way to call the genes and transcripts overlapping with the CNV regions, the more conservative 'within' and the more open 'any'. We run and save both, for all segmented files from CNV Calling. 
+```{r message=FALSE, warning=FALSE}
+throwout <- 'yu'
+throwout_percent <- .05
+
+toThrowout <- function(start){
+  loc <- as.numeric(start)/as.numeric(ref[ref$RefSeqAccn == "NC_051241.1",]$SequenceLength)
+  return(loc<throwout_percent | loc > (1-throwout_percent))
+}
+
+
+seg_files <- list.files(path="partials/segmented",recursive = TRUE,full.names = FALSE)
+
+cnvDownstream <- function(x){
+  tryCatch({
+  #bp <- str_split_fixed(x, "/",3)[1]
+  #normType <-  str_split_fixed(x, "/",3)[2]
+  #sizeFactor <-  str_split_fixed(str_split_fixed(x, "/",3)[3], "-",4)[1]
+  #minReadCount <- str_split_fixed(str_split_fixed(x, "/",3)[3], "-",4)[2]
+  tum <- str_split_fixed(str_split_fixed(x, "/",3)[3], "-",4)[3]
+  normal <- str_split_fixed(str_split_fixed(x, "/",3)[3], "-",4)[4]
+  
+  for(loc in c(saveloc, "partials/cnv")){
+  dir.create(paste(loc,type,sep="/"))
+  dir.create(paste(loc,type, str_split_fixed(x, "/",3)[1], sep="/"))
+  dir.create(paste(loc,type, str_split_fixed(x, "/",3)[1],str_split_fixed(x, "/",3)[2], sep="/"))
+  }
+  
+  cnv_file <- paste0("partials/cnv/",type,"/", x)
+  gene_file <- paste0(saveloc,type,"/", str_remove(x, ".gz"), "_cnvs.txt")
+  table_file <- paste0(saveloc,type,"/", str_remove(x, ".gz"), "_cnvs.tsv")
+  protein_file <- paste0(saveloc,type,"/", str_remove(x, ".gz"), "_protein_sequences.txt")
+  dna_file <- paste0(saveloc,type,"/", str_remove(x, ".gz"), "_dna_sequences.txt")
+  
+  if(reuse & file.exists(cnv_file) & file.exists(gene_file) & file.exists(table_file) & file.exists(protein_file) & file.exists(dna_file)){
+    message("All files exist for ", x)
+  }
+  else{
+  if(reuse & file.exists(cnv_file)){
+    message("Loading annotate cnv file ", cnv_file)
+    load(cnv_file)
+  }
+  else{
+  print(paste0("=== ANNOTATING FOR TUMOR ", tum))
+  # load in the called data
+  message("Loading segmentation file ", x)
+  load(paste0("partials/segmented/", x))
+
+  # add annotations
+  
+  cnv <- cnvr(segmented) # should be loaded in 
+  cnv <- annotateGenes(cnv, txdb)
+  cnv <- annotateTranscripts(cnv, txdb,tum)
+
+  # and then save the annotations
+  message("Saving annotation file ", cnv_file)
+  save(cnv, file=cnv_file,compress=TRUE)
+  }
+
+    
+  cnv <- as.data.frame(cnv) %>% mutate(throwout = toThrowout(start) | toThrowout(end))
+  if(grepl(throwout, x)){
+    print(paste("Threw out", count(cnv %>% filter(throwout)), "regions"))
+    print(cnv%>% filter(throwout))
+    cnv <- cnv %>% filter(!throwout)
+  }
+  
+  if(!(reuse & file.exists(gene_file))){
+    message("saving gene file at ", gene_file)
+    write(cnv$gene_id %>% unlist(), gene_file) # only gene information
+  }
+  if(!(reuse & file.exists(table_file))){
+        message("saving cnv table at ", table_file)
+  write.table( # more full data, allows recreation
+    cnv,
+    file = table_file,
+    quote = FALSE,
+    sep = '\t',
+    row.names = FALSE
+  )
+  }
+  # and then save the protein and dna sequences based on the annotated genes
+  if(!(reuse & file.exists(protein_file))){
+    message("Saving cnv protein sequences at ", protein_file)
+    saveSeq(cnv,aa,protein_file)
+  }
+  if(!(reuse & file.exists(dna_file))){
+    message("Saving cnv dna sequences at ", dna_file)
+    saveSeq(cnv,dna, dna_file)
+  }
+  }}, error=function(cond){
+    message("CNV annotation failed for ", x) 
+    message(cond, "\n")
+    })
+}
+
+for(type in c('within', 'any')){
+lapply(seg_files, cnvDownstream)
+}
+
+
+
+# do some cleanup
+rm(dna)
+rm(aa)
+gc()
+```
+You then need to run some bash scripts. 
+```{bash eval=FALSE, engine.path="/bin/bash"}
+pwd
+cd 02-Annotation/any/
+find -name "*_cnvs.txt" -exec sh product_name.sh "{}" \;
+sh make_raw.sh 
+```
+

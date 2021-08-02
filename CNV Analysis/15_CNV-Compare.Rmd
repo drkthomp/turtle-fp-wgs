@@ -1,0 +1,36 @@
+```{r Load in What We Have Avaliable}
+library(imager)
+library(tidyverse)
+
+
+file_list <- list.files(path="partials/segmented/5000/poisson/")
+cnv_plots <- data.frame(files=file_list) %>% mutate(sizeFactor=str_split_fixed(file_list,"-",2)[,1],minReadCount=as.numeric(str_split_fixed(str_split_fixed(file_list,"-",2)[,2], "_", 2)[,1]), turtle=str_remove(str_split_fixed(str_split_fixed(file_list,"-",2)[,2], "_", 2)[,2], ".gz")) %>% arrange(minReadCount, sizeFactor)
+```
+
+## Compare Mean Size Distribution
+```{r Compare Mean}
+sizeFact <- "mean"
+minReadCounts <- unique((cnv_plots %>% filter(sizeFactor == sizeFact))$minReadCount)
+```
+
+### 27L1fdna 
+```{r Load Segmentation Data for 27L1fdna}
+turt <- "27L1Fdna-27L5Hdna"
+valid <- cnv_plots %>% filter(sizeFactor == sizeFact & turtle == turt)
+segment_data <- lapply(valid$files, function(x) {
+  message(x)
+  load(paste0("partials/segmented/poisson/",x))
+  return(segmented)
+})
+names(segment_data) <- valid$minReadCount
+```
+```{r fig.width=30,fig.height=15}
+
+segplot(segment_data$`4`,ylim = c(-5, 5),plot.type = "s")
+segplot(segment_data$`8`,ylim = c(-5, 5),plot.type = "s")
+
+```
+
+
+
+

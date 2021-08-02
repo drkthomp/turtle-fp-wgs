@@ -1,0 +1,42 @@
+---
+title: "VCF Analysis"
+output:
+  html_document:
+    toc: yes
+    df_print: paged
+  html_notebook:
+    toc: yes
+    fig_width: 7
+    fig_height: 8
+    number_sections: yes
+---
+```{r Set Up}
+setwd("~/2021-REU/somatypus")
+library(vcfR)
+library(tidyverse)
+```
+
+# Inputs
+First we need to read in the relevant vcf, dna, and gff data. Since is is so large we only do this one chromosome at a time. 
+```{r Read in data}
+chrName <- "NC_051241.1"
+vcf <- read.vcfR(paste0("output/", chrName, ".recode.vcf"), verbose = FALSE)
+gff <- read.table("input/GCF_015237465.1_rCheMyd1.pri_genomic.gff", sep="\t", quote="") %>% filter(V1 == chrName)
+```
+Then we create the chromosome object to graph with. 
+```{r Create Chromosome}
+chrom <- create.chromR(name=chrName, vcf=vcf, ann=gff)
+chrom_proc <- proc.chromR(chrom, verbose=FALSE)
+```
+# Plot Chromosome 
+```{r Plot Chromosome, fig.height=10}
+chromoqc(chrom_proc, dp.alpha = 22)
+plot(chrom_proc)
+```
+```{r Genotyping Info}
+gq <- extract.gt(chrom, element="GQ", as.numeric=TRUE)
+dp <- extract.gt(chrom, element="DP", as.numeric=TRUE)
+par( mar = c(8,4,4,2) )
+boxplot(gq, las=2, col=2:5, main="Genotype Quality (GQ)")
+```
+

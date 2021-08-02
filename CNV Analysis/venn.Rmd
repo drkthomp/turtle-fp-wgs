@@ -1,0 +1,119 @@
+```{r}
+library(eulerr)
+library(tidyverse)
+library(UpSetR)
+library(RColorBrewer)
+library(GenomicFeatures)
+
+#devtools::install_github("jiho/chroma")
+library("chroma")
+type <- "any"
+```
+
+
+```{r Loading Functions}
+file_list <- str_remove(list.files(path=paste0("partials/cnv/",type)), ".gz")
+
+# create the empy dataframe
+throwout <- 'NONE'
+throwout_percent <- .05
+
+ref <- getChromInfoFromNCBI("GCF_015237465.1",assembled.molecules.only=TRUE,assembly.units = "Primary Assembly")
+
+toThrowout <- function(start){
+  loc <- as.numeric(start)/as.numeric(ref[ref$RefSeqAccn == "NC_051241.1",]$SequenceLength)
+  return(loc<throwout_percent | loc > (1-throwout_percent))
+}
+
+
+read.cnv <- function(x){
+  load(paste0("partials/cnv/",type,"/",x, ".gz"))
+  cnv <- as.data.frame(cnv)
+  cnv <- cnv %>% mutate(throwout = toThrowout(start) | toThrowout(end))
+  if(grepl(throwout, x)){
+    print(paste("Threw out", count(cnv %>% filter(throwout)), "regions"))
+    print(cnv %>% filter(throwout))
+    cnv <- cnv %>% filter(!throwout)
+    write(cnv$gene_id %>% unlist(), paste0(type,"/", x, "_FILTERED_cnvs.txt")) # only gene information
+  write.table( # more full data, allows recreation
+    cnv,
+    file = paste0(type,"/", x, "_FILTERED_cnvs.tsv"),
+    quote = FALSE,
+    sep = '\t',
+    row.names = FALSE
+  )
+  }
+  cnv <- cnv %>% mutate(id=paste0(seqnames,":",start,"-",end)) # and make a unique id for each region
+  return(cnv)
+}
+
+read.cnv.all <- function(x) {
+  cnv <- read.cnv(x)
+  cnv <- cnv %>% mutate(src=x) # and store the src 
+  return(as.data.frame(cnv))
+}
+read.cnv.id <- function(x) {
+  return(read.cnv(x)$id)
+}
+read.cnv.genes <- function(x) {
+  return(unique(as.character(unlist(read.cnv(x)$gene_id))))
+}
+
+colors_edge <- as.vector(c("#e41a1c", rep("#377eb8",2), "#4daf4a", "#984ea3","#c36100", "#c47800", "#c38e00", rep("#bfa407", 3), "#b9b925"))
+colors_fill <- alpha(lighten(colors_edge,amount=2))
+cnv_ids <- lapply(file_list, read.cnv.id)
+names(cnv_ids) <- str_split(file_list,"-",simplify = TRUE)[,1]
+cnv_genes <- lapply(file_list, read.cnv.genes)
+names(cnv_genes) <- str_split(file_list,"-",simplify = TRUE)[,1]
+
+sets <- rev(names(cnv_ids))
+metadata <- as.data.frame(cbind(sets, colors=sets))
+```
+
+
+```{r Region UpSetR}
+upset(fromList(cnv_ids), order.by = "degree",mb.ratio = c(0.4, 0.6),mainbar.y.label = "CNVs Shared", sets.x.label = "CNVS per Sample",sets=sets,keep.order = TRUE,sets.bar.color = rev(colors_edge), set.metadata = list(data = metadata, plots = list(list(type = "matrix_rows", 
+    column = "colors", colors = setNames(colors_edge, names(cnv_ids)), 
+    alpha = 1))))
+```
+
+```{r Gene Olvep Ru, fig.width=15}
+upset(fromList(cnv_genes), order.by = "degree", nintersects = NA, mb.ratio = c(0.4, 0.6),mainbar.y.label = "Genes in Intersection", sets.x.label = "Genes per Sample",sets=sets,keep.order = TRUE,sets.bar.color = rev(colors_edge), set.metadata = list(data = metadata, plots = list(list(type = "matrix_rows", 
+    column = "colors", colors = setNames(colors_edge, names(cnv_ids)), 
+    alpha = 1))))
+```
+
+```{r Count}
+genes <- data.frame(genes=unlist(cnv_genes))
+unique_genes <- genes %>% group_by(genes) %>% tally()
+write.csv(unique_genes %>% filter(n>1) %>% arrange(-n),file = paste0(type,"/filter_",throwout,".csv"))
+```
+
+
+```{r fig.height=13}
+cnv_all <- lapply(file_list, read.cnv.all)
+lapply(cnv_all, saveCnvs)
+names(cnv_all) <- str_split(file_list,"-",simplify = TRUE)[,1]
+test <- cnv_all %>% purrr::reduce(full_join, by = c("seqnames", "start", "end", "TUMOUR","src"))  %>% select(c("seqnames", "start", "end", "TUMOUR", "src")) %>% mutate(TUMOUR = parse_number(TUMOUR))
+head(test)
+
+```
+```{r}
+filter_yu <- read.csv("~/2021-REU/CNV Analysis/filter_yu.csv", row.names=1)
+filter_NONE <- read.csv("~/2021-REU/CNV Analysis/filter_NONE.csv", row.names=1)
+filtered <- full_join(filter_yu,filter_NONE,by="genes")
+names(filtered)[2:3] <- c("yu", "NONE")
+```
+
+```{r Eulerr Overlap, eval=FALSE, include=FALSE}
+# this takes forever, don't run this normally 
+id_overlap <- euler(cnv_ids,shape="ellipse")
+plot(id_overlap, main="CNV Region Overlap",quantities=TRUE,fills=colors_fill,edges=colors_edge)
+print(id_overlap)
+
+c(names(cnv_ids) = colors_edge)
+gene_overlap <- euler(cnv_genes,shape="ellipse")
+plot(gene_overlap, main="CNV Gene Overlap",quantities=TRUE,fills=colors_fill,edges=colors_edge)
+
+
+```
