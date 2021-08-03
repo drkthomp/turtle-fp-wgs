@@ -2,7 +2,7 @@ library(rmarkdown)
 library(tidyverse)
 
 types <- c("within", "any")
-file_list <- as.data.frame(str_split_fixed(list.files(paste0("partials/cnv/"), recursive = TRUE), "/", 4)) %>%
+file_list <- as.data.frame(str_split_fixed(list.files(paste0("partials/cnv/"), recursive = TRUE,f), "/", 4)) %>%
   mutate(
     minReadCounts = parse_number(str_split_fixed(V4, "-", 4)[, 2]),
     V4 = str_split_fixed(V4, "-", 4)[, 1]

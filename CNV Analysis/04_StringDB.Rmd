@@ -6,6 +6,8 @@ params:
     minReadCount: 4
     normType: "poisson"
     sizeFactor: "mean"
+    filter: 0.01
+    byChrom: TRUE
 ---
 Run on `r date()` with `r params$bp`bp size windows, `r params$normType` normalized with the `r params$sizeFactor` size factor. A minimum of `r params$minReadCount` CNVs were required for a segment to be recorded. Gene annotations were done as `r params$type` with the segment. 
 ```{r Load Relevant Libraries}

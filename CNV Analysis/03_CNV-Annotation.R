@@ -11,16 +11,36 @@ saveloc <- "02-Annotation/"
 reuse <- TRUE
 
 #### 1. Load Genome Data ####
-load("partials/sample_data")
+sample_data <- read.csv("~/2021-REU/CNV Analysis/partials/sample_data.tsv", sep="")
 
 dna <- extractTranscriptSeqs(BSgenome.Cmydas.NCBI.rCheMyd1, txdb,
                       use.names=TRUE)
 aa <- suppressWarnings(translate(dna))
 
 txdb <- loadDb("rCheMyd1.sqlite") # generated from rCheMyd1
-ref <- getChromInfoFromNCBI("GCF_015237465.1",assembled.molecules.only=TRUE,assembly.units = "Primary Assembly")
-ref_seq <- getChromInfoFromNCBI("GCF_015237465.1",as.Seqinfo=TRUE,assembled.molecules.only=TRUE,assembly.units = "Primary Assembly")
-seqnames(ref_seq) <- ref$RefSeqAccn
+ref_file <- "partials/ref.Rdata"
+if (file.exists(ref_file)) {
+  load(ref_file)
+} else {
+  ref <- getChromInfoFromNCBI("GCF_015237465.1",
+                              assembled.molecules.only = TRUE,
+                              assembly.units = "Primary Assembly"
+  )
+  save(ref, file = ref_file)
+}
+
+ref_seq_file <- "partials/ref_seq.Rdata"
+if (file.exists(ref_seq_file)) {
+  load(ref_seq_file)
+} else {
+  ref_seq <- getChromInfoFromNCBI("GCF_015237465.1",
+                                  as.Seqinfo = TRUE,
+                                  assembled.molecules.only = TRUE,
+                                  assembly.units = "Primary Assembly"
+  )
+  seqnames(ref_seq) <- ref$RefSeqAccn
+  save(ref_seq, file = ref_seq_file)
+}
 
 protein_table <- makeGRangesFromDataFrame(read.delim("~/2021-REU/CNV Analysis/ProteinTable_13308_1483792_Cm_NEW_NCBI.txt", quote="") %>% clean_names() %>% rename(seqnames=accession) %>% dplyr::select(-x_name),keep.extra.columns=TRUE)
 

@@ -142,7 +142,7 @@ filterCountsAcrossSamples <- function(norm_grange, filter = 0.01,
       }
       return(NULL)
     })
-    if (is.null(grange)) { # exit early in case of null
+    if (is.null(norm_data)) { # exit early in case of complete null
       return(NULL)
     } #otherwise continue
     norm_data <- norm_data %>% purrr::reduce(cbind)
