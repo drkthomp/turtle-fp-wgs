@@ -11,65 +11,9 @@ setwd("~/2021-REU/CNV Analysis")
 #### 0. Define Settings ####
 reuse <- TRUE # whether to reuse files
 dataloc <- "readcounts/" # note where the readcounts are
-bp <- 5000 # then bp we're using
 # and the final file name before the tumor:
 file_prefix <- paste0(dataloc, "readcounts_", bp, "BP_")
-
-#### 1. Load Sample Data ####
-loadSampleData <- function() {
-  if (file.exists("partials/sample_data")) {
-    message("Sample data file exists, loading.")
-    # if we've already done this, just load it
-    load("partials/sample_data")
-  } else {
-    message("Generating sample data file.")
-    sample_data <-
-      read.delim("~/2021-REU/Genomic_Samples_Table.xlsx - Sheet1.tsv") %>%
-      clean_names() %>%
-      mutate(sample_name = str_replace_all(sample_name, " - HiSeq", "")) %>%
-      filter(type == "New")
-
-    # correct column names
-    names(sample_data)[names(sample_data) == "internal_external"] <-
-      "tumor_src"
-    names(sample_data)[names(sample_data) == "tumor_non_tumor"] <-
-      "tissue_status"
-
-    # and STATICALLY correct Yucca's kidneys to be analyzed seperately
-    sample_data <-
-      sample_data %>% mutate(turtle = case_when(
-        (turtle == "Yucca" &
-          tumor_sample_location == "kidney ") ~ "Yucca_kidney",
-        TRUE ~ turtle
-      ))
-
-
-    # create only the match data for turtle, tumor, and non-tumor
-    match_data <- sample_data %>%
-      pivot_wider(
-        names_from = tissue_status,
-        values_from = sample_name,
-        id_cols = turtle
-      ) %>%
-      unnest(c(tumor, "non-tumor"))
-    # and correct the non-tumor to a more tidy normal
-    names(match_data)[names(match_data) == "non-tumor"] <- "normal"
-
-    # then combine the data for easy iteration
-    sample_data <-
-      left_join(sample_data %>% filter(tissue_status == "tumor"),
-        match_data,
-        by = c("sample_name" = "tumor")
-      ) %>%
-      select(-"turtle.y") %>%
-      distinct()
-
-    # and save it for use in other scripts for simplicity
-    save(sample_data, "partials/sample_data")
-  }
-  return(sample_data)
-}
-sample_data <- loadSampleData()
+sample_data <- read.csv("~/2021-REU/CNV Analysis/partials/sample_data.tsv", sep = "")
 
 
 #### 2. Load Reference Data ####
@@ -259,19 +203,78 @@ callCNVfromNorm <- function(norm, minReadCount = 5, parallel = 2) {
   return(segmented)
 }
 ###### 3.2.2 Filtering ######
+###### TODO make functional. currently obselete
+filterCNVHelper <- function(cnv_single, quant_single) {
+  if(length(cnv_single) > 0){ # make sure there are CNVs in the chromosome
+    pass <- lapply(cnv_single, function(x){
+      return(x < quant_single[1] | x > quant_single[2])
+    }) %>% unlist()
+    return(pass)
+  }
+}
+####### 3.2.2.1 By Signifigance
 # For the remainder list of CNV segments, go through each segment/tumour pair
 # and remove the call if a tumour’s normalised median read count within
 # it is not significantly above or below its background distribution
 # across the whole genome/chromosome
-filterCNVSignifigance <- function(segmented) {
+filterCNVSignifigance <- function(segmented, filter = 0.05, byChrom = TRUE) {
+  cnvs <- cnvs(segmented)
+  if (byChrom) {
+    cnvs <- splitAsList(cnvs, seqnames(cnvs))
+    quantile <- lapply(splitAsList(normalizedData(segmented), seqnames(normalizedData(segmented))), function(x) {
+      return(quantile(x$TUMOUR, probs = c(.5 - filter, .5 + filter)))
+    })
+
+    pass <- lapply(names(cnvs), function(x, cnvs, quantile) {
+      median_data <- mcols(cnvs[[x]])$median
+      if(length(median_data) > 0){
+      return(filterCNVHelper(median_data, quantile[[x]]))
+      }
+    }, cnvs = cnvs, quantile = quantile) %>% unlist()
+
+  } else {
+    quantile <- quantile(normalizedData(segmented)$TUMOUR, probs = c(.5 - filter, .5 + filter))
+    pass <- filterCNVHelper(mcols(cnvs)$median, quantile)
+  }
+  return(cnvs(segmented)[pass])
 }
 
+####### 3.2.2.2 By Shared Deviation
 # remove the call if both tumour AND matched normal(s)
 # deviate significantly from their background distributions
 # (in this case it’s likely not a tumour-specific event)
-filterCNVTumour <- function(segmented) {
+filterCNVTumour <- function(norm, cnvs, filter = 0.05) {
+  if (byChrom) {
+    cnvs <- splitAsList(cnvs, seqnames(cnvs))
+    norm <- splitAsList(norm, seqnames(norm))
 
+    # TODO fix repeats here
+    tumour_quantile <- lapply(norm, function(x) {
+      return(quantile(x$TUMOUR, probs = c(filter, 1 - filter)))
+    })
+    host_quantile <- lapply(norm, function(x) {
+      return(quantile(x$HOST, probs = c(filter, 1- filter)))
+    })
+
+    tumour_pass <- lapply(names(norm), function(x, norm, quantile) {
+      if(length(norm[[x]]) > 0){
+        return(filterCNVHelper(norm[[x]]$TUMOUR, quantile[[x]]))
+      }
+    }, norm = norm, quantile = tumour_quantile) %>% unlist()
+    host_pass <- lapply(names(norm), function(x, norm, quantile) {
+      if(length(norm[[x]]) > 0){
+        return(filterCNVHelper(norm[[x]]$HOST, quantile[[x]]))
+      }
+    }, norm = norm, quantile = host_quantile) %>% unlist()
+
+  } else {
+    quantile <- quantile(normalizedData(segmented)$TUMOUR, probs = c(.5 - filter, .5 + filter))
+    pass <- filterCNVHelper(mcols(cnvs)$median, quantile)
+  }
+  return(cnvs(segmented)[pass])
 }
+
+
 ###### 3.2.3 Visualization ######
 plotCNV <- function(tum, segmented, base_loc, lim = 5) {
   chromplot_file <- paste0(base_loc, "-", tum, " FP - chromosome segplot.png")
@@ -319,47 +322,49 @@ plotloc <- paste0("01_CNV-Plots/", bp, "/")
 dir.create(partloc)
 dir.create(plotloc)
 
-# here the point is to run multiple norm options
-for (normType in c("poisson", "mode", "mean", "min", "median", "quant")) {
-  dir.create(paste0("partials/segmented/", bp, "/", normType))
-  dir.create(paste0("partials/normalized/", bp, "/", normType))
+for (bp in c(5000, 1000)) {
+  # here the point is to run multiple norm options
+  for (normType in c("poisson", "mode", "mean", "median")) {
+    dir.create(paste0("partials/segmented/", bp, "/", normType))
+    dir.create(paste0("partials/normalized/", bp, "/", normType))
 
-  # with multiple possible size factors
-  for (sizeFactor in c("mean", "median", "mode", "quant")) {
-    for (filter in c(0, 0.01, 0.05)) { # and different filters for across samples
-      for (byChrom in c(TRUE, FALSE)) { # either by chrom or not by chrom
-        # then we can normalize and save each option
-        norm_grange <- prepCounts(sample_data,
-          bp = bp, normType = normType,
-          sizeFactor = sizeFactor, filter = filter,
-          byChrom = byChrom
-        )
-        # then the only seg option, minReadCount
-        for (minReadCount in c(4, 8, 10, 16, 20, 32)) {
-          seg_file <- paste0(
-            "partials/segmented/", bp, "/", normType, "/",
-            sizeFactor, "-", filter, "-", byChrom, "-", minReadCount, ".gz"
+    # with multiple possible size factors
+    for (sizeFactor in c("mean", "median", "mode")) {
+      for (filter in c(0, 0.01, 0.05)) { # and different filters for across samples
+        for (byChrom in c(TRUE, FALSE)) { # either by chrom or not by chrom
+          # then we can normalize and save each option
+          norm_grange <- prepCounts(sample_data,
+            bp = bp, normType = normType,
+            sizeFactor = sizeFactor, filter = filter,
+            byChrom = byChrom
           )
-          if (reuse & file.exists(seg_file)) {
-            message("Segmentation file exists for minReadCount ", minReadCount)
-            load(seg_file)
-          } else {
-            message("Running segmentation for minReadCount ", minReadCount)
-            segmented <- lapply(norm_grange, callCNVfromNorm, minReadCount = minReadCount)
-            save(segmented, file = seg_file)
-          }
-
-          message("Plotting segmentation")
-          lapply(names(segmented), plotCNV,
-            segmented = segmented,
-            base_loc = paste0(
-              plotloc, "/", normType, "/",
-              sizeFactor, "-", filter, "-",
-              byChrom, "-", minReadCount
+          # then the only seg option, minReadCount
+          for (minReadCount in c(4, 8, 10, 16, 20, 32)) {
+            seg_file <- paste0(
+              "partials/segmented/", bp, "/", normType, "/",
+              sizeFactor, "-", filter, "-", byChrom, "-", minReadCount, ".gz"
             )
-          )
-          rm(segmented)
-          gc()
+            if (reuse & file.exists(seg_file)) {
+              message("Segmentation file exists for minReadCount ", minReadCount)
+              load(seg_file)
+            } else {
+              message("Running segmentation for minReadCount ", minReadCount)
+              segmented <- lapply(norm_grange, callCNVfromNorm, minReadCount = minReadCount)
+              save(segmented, file = seg_file)
+            }
+
+            message("Plotting segmentation")
+            lapply(names(segmented), plotCNV,
+              segmented = segmented,
+              base_loc = paste0(
+                plotloc, "/", normType, "/",
+                sizeFactor, "-", filter, "-",
+                byChrom, "-", minReadCount
+              )
+            )
+            rm(segmented)
+            gc()
+          }
         }
       }
     }
