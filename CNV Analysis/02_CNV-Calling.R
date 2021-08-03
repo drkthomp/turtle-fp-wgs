@@ -6,29 +6,41 @@ library(GenomicFeatures)
 
 # Calls CNVs and performs basic filtering of the read counts
 
-setwd("~/2021-REU/CNV Analysis")
-
+#setwd("~/2021-REU/CNV Analysis")
+bp <- 5000
 #### 0. Define Settings ####
 reuse <- TRUE # whether to reuse files
 dataloc <- "readcounts/" # note where the readcounts are
 # and the final file name before the tumor:
 file_prefix <- paste0(dataloc, "readcounts_", bp, "BP_")
-sample_data <- read.csv("~/2021-REU/CNV Analysis/partials/sample_data.tsv", sep = "")
+sample_data <- read.csv("partials/sample_data.tsv", sep = "")
 
 
 #### 2. Load Reference Data ####
 txdb <- loadDb("rCheMyd1.sqlite") # generated from rCheMyd1
+ref_file <- "partials/ref.Rdata"
+if(file.exists(ref_file)){
+load(ref_file)
+} else{
 ref <- getChromInfoFromNCBI("GCF_015237465.1",
   assembled.molecules.only = TRUE,
   assembly.units = "Primary Assembly"
 )
+save(ref,file=ref_file)
+}
+
+ref_seq_file <- "partials/ref_seq.Rdata"
+if(file.exists(ref_seq_file)){
+load(ref_seq_file)
+} else{
 ref_seq <- getChromInfoFromNCBI("GCF_015237465.1",
   as.Seqinfo = TRUE,
   assembled.molecules.only = TRUE,
   assembly.units = "Primary Assembly"
 )
 seqnames(ref_seq) <- ref$RefSeqAccn
-
+save(ref_seq,file=ref_seq_file)
+}
 
 #### 3. Define Functions ####
 ##### 3.1 Count Functions #####
@@ -124,9 +136,14 @@ filterCountsAcrossSamples <- function(norm_grange, filter = 0.01,
   } else {
     norm_data <- lapply(names(norm_grange), function(x) {
       grange <- norm_grange[[x]]
+if(!is.null(grange)){ # guard against there being nothing 
       names(mcols(grange)) <- c(x, sample_data[sample_data$sample_name == x, ]$normal)
       return(cbind(as.data.frame(seqnames(grange)), as.data.frame(mcols(grange))))
-    }) %>% purrr::reduce(cbind)
+    }return(Null)})
+if(is.null(grange)){ # exit early in case of null
+return(Null)
+}
+norm_data <- norm_data %>% purrr::reduce(cbind)
     norm_data <- norm_data[, !duplicated(colnames(norm_data))] %>%
       rename(chr = value)
     if (byChrom) {
@@ -322,7 +339,7 @@ plotloc <- paste0("01_CNV-Plots/", bp, "/")
 dir.create(partloc)
 dir.create(plotloc)
 
-for (bp in c(5000, 1000)) {
+#for (bp in c(5000, 1000)) {
   # here the point is to run multiple norm options
   for (normType in c("poisson", "mode", "mean", "median")) {
     dir.create(paste0("partials/segmented/", bp, "/", normType))
@@ -369,4 +386,4 @@ for (bp in c(5000, 1000)) {
       }
     }
   }
-}
+#}
